@@ -1,0 +1,114 @@
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import time
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.metrics import silhouette_score, davies_bouldin_score
+
+# Configuration and Paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+IMG_DIR = os.path.join(BASE_DIR, "imagenes")
+RES_DIR = os.path.join(BASE_DIR, "resultados")
+
+os.makedirs(RES_DIR, exist_ok=True)
+
+# List images in the folder (processes between 3 and 5 images)
+image_files = [f for f in os.listdir(IMG_DIR) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+if not image_files:
+    print(f"Error: No images found in {IMG_DIR}")
+    exit()
+
+print(f"Images found ({len(image_files)}): {image_files}\n")
+
+# Process each image
+for img_file in image_files:
+    img_path = os.path.join(IMG_DIR, img_file)
+    img_bgr = cv2.imread(img_path)
+
+    if img_bgr is None:
+        print(f"Could not load image: {img_file}")
+        continue
+
+    print(f"==================================================")
+    print(f" PROCESSING IMAGE: {img_file}")
+    print(f"==================================================")
+
+    # 1. Preprocessing (BGR to RGB & CIELab)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
+    lab = lab.astype("float32") / 255.0
+
+    # 2. Feature Vector Construction [Color (L,a,b) + Spatial Coordinates (X,Y)]
+    alto, ancho, _ = lab.shape
+    x, y = np.meshgrid(np.arange(ancho), np.arange(alto))
+
+    # Weight spatial coordinates (0.2) so color remains dominant
+    X = np.column_stack((
+        lab[:, :, 0].flatten(),
+        lab[:, :, 1].flatten(),
+        lab[:, :, 2].flatten(),
+        (x.flatten() / ancho) * 0.2,
+        (y.flatten() / alto) * 0.2
+    ))
+
+    # Downsample for faster metrics computation on large images
+    sample_size = min(5000, X.shape[0])
+    idx_sample = np.random.choice(X.shape[0], size=sample_size, replace=False)
+
+    valores_k = [2, 3, 4, 5, 6]
+
+    for k in valores_k:
+        # --- A) K-MEANS ALGORITHM ---
+        t0 = time.time()
+        kmeans_model = KMeans(n_clusters=k, random_state=0, n_init=10)
+        labels_km = kmeans_model.fit_predict(X)
+        t_km = time.time() - t0
+
+        sil_km = silhouette_score(X[idx_sample], labels_km[idx_sample])
+        db_km = davies_bouldin_score(X[idx_sample], labels_km[idx_sample])
+
+        # Morphological Post-processing
+        seg_km = labels_km.reshape(alto, ancho).astype(np.uint8)
+        kernel = np.ones((3, 3), np.uint8)
+        seg_km_post = cv2.morphologyEx(seg_km, cv2.MORPH_OPEN, kernel)
+
+        # --- B) GMM ALGORITHM (Required for Method Comparison) ---
+        t0 = time.time()
+        gmm_model = GaussianMixture(n_components=k, random_state=0)
+        labels_gmm = gmm_model.fit_predict(X)
+        t_gmm = time.time() - t0
+
+        sil_gmm = silhouette_score(X[idx_sample], labels_gmm[idx_sample])
+        db_gmm = davies_bouldin_score(X[idx_sample], labels_gmm[idx_sample])
+
+        seg_gmm = labels_gmm.reshape(alto, ancho).astype(np.uint8)
+        seg_gmm_post = cv2.morphologyEx(seg_gmm, cv2.MORPH_OPEN, kernel)
+
+        # Print metrics comparison table in console
+        print(f"\n[K = {k}]")
+        print(f"  K-Means  -> Sil: {sil_km:.3f} | DB: {db_km:.3f} | Time: {t_km:.2f}s")
+        print(f"  GMM      -> Sil: {sil_gmm:.3f} | DB: {db_gmm:.3f} | Time: {t_gmm:.2f}s")
+
+        # Save side-by-side comparison image
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        axes[0].imshow(seg_km_post, cmap="tab20")
+        axes[0].set_title(f"K-Means (k={k})\nSil: {sil_km:.3f} | DB: {db_km:.3f}")
+        axes[0].axis("off")
+
+        axes[1].imshow(seg_gmm_post, cmap="tab20")
+        axes[1].set_title(f"GMM (k={k})\nSil: {sil_gmm:.3f} | DB: {db_gmm:.3f}")
+        axes[1].axis("off")
+
+        base_name = os.path.splitext(img_file)[0]
+        out_fig_path = os.path.join(RES_DIR, f"{base_name}_k{k}_comparison.png")
+        plt.tight_layout()
+        plt.savefig(out_fig_path, bbox_inches="tight")
+        plt.close()
+
+print("\n==================================================")
+print("PROCESS COMPLETED")
+print("Note for IEEE Report: IoU/Dice metrics were omitted due to lack of ground-truth masks.")
+print("==================================================")
